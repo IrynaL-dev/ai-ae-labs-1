@@ -108,6 +108,68 @@ tasks:
         fi
         echo "all files gofmt-clean"
 
+  # --- vulnerability scan ---------------------------------------------------
+  #
+  # Reachability analysis, not a list of version numbers: govulncheck builds a
+  # call graph and reports only the advisories your code can actually reach. A
+  # module bump that merely *contains* a bad version does not fail here; a
+  # genuinely callable one does. That is why this is a gate and not a report.
+  #
+  # Exit codes: 0 — nothing reachable; 3 — at least one reachable advisory;
+  # 1 — tool/analysis error (network, bad package). 3 is the "found something"
+  # signal, so it must NOT be swallowed — `task vuln` fails on it. Note that
+  # Task reports its own 201 for a failed command; add `-x` to pass
+  # govulncheck's 3 through to the shell:  task -x vuln
+  #
+  # The gate is RED on the published materials, by design and for a reason worth
+  # understanding. All 8 reachable advisories are in github.com/ollama/ollama,
+  # pulled in transitively by the course's own model client (pi-go/pimodels) —
+  # and govulncheck prints "Fixed in: N/A" for every one of them: there is no
+  # patched release to move to. Suppressing them with -exclude or a baseline
+  # file would hide the next, genuinely fixable finding too, so the task reports
+  # and fails honestly instead. This is why `vuln` is not part of `check`.
+  #
+  # Needs govulncheck on PATH:  go install golang.org/x/vuln/cmd/govulncheck@latest
+  # The scan downloads the vulnerability DB on first use; afterwards it works
+  # from the module cache.
+  vuln:
+    desc: 'Scan for reachable vulnerabilities (fails the task when any are found)'
+    cmds:
+      - govulncheck ./...
+
+  # Same blind spot `build:all` closes: a nested module is not part of ./...
+  # from the root, so `vuln` alone would never look inside demo/adk-quickstart
+  # or the mock-llm module. Kept separate from `vuln` so the fast root scan
+  # stays fast.
+  #
+  # Two details here are deliberate and differ from `build:modules` above:
+  #
+  #   * no `set -e`. A scan that stops at the first affected module would report
+  #     one module and silently skip the rest — the opposite of what a scan is
+  #     for. Failures are collected and the task exits non-zero at the end, so
+  #     every module is always looked at.
+  #   * scratch trees are excluded. `find` from the repo root also sees the
+  #     vendored copies under .claude/, .pi-go/ and tmp/, which are not this
+  #     repo's modules; scanning them reports findings against a stale checkout.
+  vuln:modules:
+    desc: 'Scan every nested Go module, even after one fails (not part of ./...)'
+    cmds:
+      - |
+        set -uo pipefail
+        mods=$(find . -name go.mod -not -path './go.mod' -not -path '*/node_modules/*' \
+                 -not -path './.*' -not -path './tmp/*' | sed 's|/go.mod$||' | sort)
+        if [ -z "$mods" ]; then echo "no nested modules found"; exit 0; fi
+        failed=
+        for m in $mods; do
+          echo "→ $m"
+          if ! (cd "$m" && govulncheck ./...); then failed="$failed $m"; fi
+        done
+        if [ -n "$failed" ]; then
+          echo "modules with findings or errors:$failed"
+          exit 1
+        fi
+        echo "no reachable vulnerabilities in nested modules"
+
   # --- test ----------------------------------------------------------------
 
   test:
