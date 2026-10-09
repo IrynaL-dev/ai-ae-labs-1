@@ -178,3 +178,85 @@ SSE на тому ж контейнері — `"status":"already_open"`. `task w
 - **Docker не бачить `go.mod`:** перевірте build context `.` у корені `ai-ae-labs`.
 
 Це навчальний однокористувацький сервіс без app-level авторизації, durable storage та платіжного API. Реєстр і сесії в пам'яті; не відкривайте його в загальнодоступну мережу. Cloud Run IAM обмежує викликачів сервісу, але не пов'язує довільний `userId` із людиною автоматично.
+
+
+
+## Звіт з виконання завдання (ADK Agent Service Deploy)
+
+### 1. Збірка та вимірювання Docker-образу
+Збірка виконана без використання тегу `:latest` на базі `FROM scratch` із додаванням CA-сертифікатів та запуском від non-root користувача:
+
+\`\`\`bash
+docker build --platform linux/amd64 -f week2/Day4_Agent_as_Service_Deploy/labs4/Dockerfile -t adk-agent-service:v1.0.0 .
+\`\`\`
+
+Результати вимірювання:
+- **Команда виміру:** `docker image ls adk-agent-service:v1.0.0`
+- **Платформа:** `linux/amd64`
+- **Фактичний розмір образу (Disk Usage):** 23.9 MB (Content Size: 6.75 MB)
+- **Runtime:** Статичний Go-бінарник (CGO_ENABLED=0), ca-certificates.crt, непривілейований користувач `65532:65532`.
+
+---
+
+### 2. Чотири curl-перевірки контракту
+
+#### 1) Liveness probe (`/health`)
+\`\`\`bash
+$ curl -i http://localhost:8080/health
+HTTP/1.1 200 OK
+Content-Type: text/plain; charset=utf-8
+Content-Length: 3
+
+OK
+\`\`\`
+
+#### 2) Readiness probe (`/readyz`)
+\`\`\`bash
+$ curl -i http://localhost:8080/readyz
+HTTP/1.1 200 OK
+Content-Type: text/plain; charset=utf-8
+Content-Length: 3
+
+OK
+\`\`\`
+
+#### 3) Створення сесії
+\`\`\`bash
+$ curl -i -X POST http://localhost:8080/api/apps/first_graph_agent/users/demo/sessions/demo-1 -H 'Content-Type: application/json' -d '{}'
+{"id":"demo-1","appName":"first_graph_agent","userId":"demo","lastUpdateTime":1791584845,"events":[],"state":{}}
+\`\`\`
+
+#### 4) Потоковий запуск через SSE (`/api/run_sse`)
+\`\`\`bash
+$ curl -N -X POST http://localhost:8080/api/run_sse -H 'Content-Type: application/json' -d '{
+  "appName": "first_graph_agent",
+  "userId": "demo",
+  "sessionId": "demo-1",
+  "streaming": true,
+  "newMessage": {
+    "role": "user",
+    "parts": [{"text": "Мерчант A-114 просить повернення по транзакції txn-2026-07-118845"}]
+  }
+}'
+
+data: {"id":"22731c1f-7562-4dbe-aa99-21c6a03a4fd3","output":{"transaction_id":"txn-2026-07-118845","merchant_id":"A-114"},"nodeInfo":{"path":"first_graph_agent@1/prepare@1"}}
+
+data: {"id":"7a6f05d8-03d4-4a87-8bdd-4c10abf20549","output":{"case_id":"rc-txn-2026-07-118845-A-114","merchant_id":"A-114","status":"pending"},"nodeInfo":{"path":"first_graph_agent@1/open_refund_case@1"}}
+
+data: {"id":"64537fd0-898b-46c7-b826-a6752e1265aa","output":"Кейс rc-txn-2026-07-118845-A-114: транзакція txn-2026-07-118845, мерчант A-114, статус pending","nodeInfo":{"path":"first_graph_agent@1/format@1"}}
+\`\`\`
+
+---
+
+### 3. Graceful Shutdown
+Тест перевірки життєвого циклу успішно пройдено:
+\`\`\`bash
+$ go test -v -run '^TestShutdown$' ./week2/Day4_Agent_as_Service_Deploy/labs4
+=== RUN   TestShutdown
+=== RUN   TestShutdown/drains_active_request
+=== RUN   TestShutdown/timeout_closes_active_request
+--- PASS: TestShutdown (0.01s)
+    --- PASS: TestShutdown/drains_active_request (0.00s)
+    --- PASS: TestShutdown/timeout_closes_active_request (0.00s)
+PASS
+\`\`\`
