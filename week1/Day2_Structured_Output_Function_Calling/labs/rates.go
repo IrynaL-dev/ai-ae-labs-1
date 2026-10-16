@@ -52,12 +52,32 @@ type RateInput struct {
 // Source is deliberately included: an agent answer that cannot say where a
 // number came from is not auditable, and provenance is a week 3 theme that
 // starts here.
+type SourceKind string
+
+const (
+	SourceKindAPI   SourceKind = "api"
+	SourceKindCache SourceKind = "cache"
+	SourceKindMock  SourceKind = "mock"
+)
+
+type PointSource struct {
+	Kind     SourceKind `json:"kind" jsonschema:"Type of data source (api, cache, mock)"`
+	Provider string     `json:"provider" jsonschema:"Provider identifier"`
+}
+
+type HistoricalPoint struct {
+	Timestamp string      `json:"timestamp" jsonschema:"ISO 8601 timestamp"`
+	Rate      float64     `json:"rate" jsonschema:"Observed rate"`
+	Source    PointSource `json:"source" jsonschema:"Detailed source provenance"`
+}
+
 type RateOutput struct {
-	Base   string  `json:"base"`
-	Target string  `json:"target"`
-	Rate   float64 `json:"rate" jsonschema:"How many units of target one unit of base buys"`
-	AsOf   string  `json:"as_of" jsonschema:"Rate date, YYYY-MM-DD"`
-	Source string  `json:"source" jsonschema:"Provenance of the rate, e.g. nbu or fixture"`
+	Base    string            `json:"base"`
+	Target  string            `json:"target"`
+	Rate    float64           `json:"rate" jsonschema:"How many units of target one unit of base buys"`
+	AsOf    string            `json:"as_of" jsonschema:"Rate date, YYYY-MM-DD"`
+	Source  string            `json:"source" jsonschema:"Provenance of the rate, e.g. nbu or fixture"`
+	History []HistoricalPoint `json:"history" jsonschema:"Array of historical points"`
 }
 
 // Provider fetches rates against UAH, which is the axis the National Bank of
@@ -115,12 +135,28 @@ func Convert(ctx context.Context, p Provider, in RateInput) (RateOutput, error) 
 		return RateOutput{}, err
 	}
 
+	rate := baseUAH / targetUAH
+	kind := SourceKindAPI
+	if p.Name() == "fixture" {
+		kind = SourceKindMock
+	}
+
 	return RateOutput{
 		Base:   base,
 		Target: target,
-		Rate:   baseUAH / targetUAH,
+		Rate:   rate,
 		AsOf:   asOf,
 		Source: p.Name(),
+		History: []HistoricalPoint{
+			{
+				Timestamp: asOf,
+				Rate:      rate,
+				Source: PointSource{
+					Kind:     kind,
+					Provider: p.Name(),
+				},
+			},
+		},
 	}, nil
 }
 
