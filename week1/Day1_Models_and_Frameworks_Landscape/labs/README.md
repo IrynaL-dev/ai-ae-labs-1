@@ -155,7 +155,7 @@ Gemini 2.5 / 3.7 Flash~1.4 s4.8/5$0.75 / $3.75Хмарний API, висока �
 
 Спробуємо згенерувати рядок із високою ентропією (випадкові символи), який точно потрапить під сигнатуру Google API Key (AIzaSy + 35 випадкових символів base64):
 
-Set-Content -Path test_leak.txt -Value "<YOUR_GOOGLE_API_KEY>"
+Set-Content -Path test_leak.txt -Value "<GOOGLE_API_KEY>"
 
 Спробую закомітити:
 
