@@ -317,3 +317,14 @@ go test ./week1/...
    5 → 100 — перевірте порядок величини на своєму випадку.
 4. **Бюджет виходу.** Обмежте розмір відповіді інструмента й покажіть у
    README, скільки токенів це економить на 10 кроках агентного циклу.
+
+### Schema Strategy: Struct Reflection vs. Explicit InputSchema
+Automatic schema inference from Go structs (`jsonschema-go`) provides rapid prototyping, keeps schemas in sync with code automatically, and minimizes boilerplate for standard data contracts. However, it lacks fine-grained validation control because struct tags do not support complex runtime constraints, regex patterns, or expressive error descriptors without custom reflection hooks. In contrast, an explicit `functiontool.Config.InputSchema` allows developers to define strict JSON Schema specifications directly, including precise enum boundaries, numeric limits, and dynamic field dependencies. Explicit configuration is therefore essential when defending against hallucinated parameters in critical tool boundaries, whereas struct reflection is ideal for internal, rapidly evolving, or uniform API endpoints. In practice, production systems should leverage automatic reflection for read-only outputs and explicit schemas for input tool execution where invalid arguments trigger expensive retry loops.
+
+## Advanced: Struct Reflection vs. Explicit InputSchema
+
+1. Автоматична генерація схеми з Go-структур через рефлексію (`jsonschema-go`) прискорює прототипування і гарантує, що контракт інструмента автоматично синхронізований із типами мови програмування без дублювання коду.
+2. Водночас рефлексія обмежена базовими типами та дескриптивними тегами й не підтримує глибоку валідацію складних контекстних обмежень безпосередньо в тегах.
+3. Явне визначення `functiontool.Config.InputSchema` через JSON Schema надає повний контроль над контрактом, дозволяючи жорстко задавати списки `enum`, чисельні діапазони (`minimum`/`maximum`), регулярні вирази та залежності між полями.
+4. Автогенерація зі структур найкраще підходить для вихідних структур (`OutputSchema`) або простих внутрішніх інструментів, де десеріалізація в Go-тип є прямою.
+5. Явна `InputSchema` є обов'язковою для критичних вхідних меж агента, коли потрібно заблокувати галюциновані параметри моделі ще до того, як виклик досягне бізнес-логіки інструмента.
