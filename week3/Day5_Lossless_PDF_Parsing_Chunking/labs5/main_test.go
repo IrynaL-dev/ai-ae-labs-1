@@ -1,36 +1,3 @@
-// Скелет тестів для ДЗ 5.
-//
-// Homework.md, пункт 7, вимагає табличні тести на кожен вузол графа через
-// agent.StrictContextMock — і `go test ./...` зеленим. Цей файл дає готову
-// форму, щоб ви не витрачали перші 40 хвилин на «як узагалі підсунути
-// agent.Context у функцію вузла».
-//
-// ЯК ЦИМ КОРИСТУВАТИСЬ
-//
-//	go test ./...            — зараз зелено: тести перевіряють ЗАГЛУШКИ
-//	                           (один гігантський чанк — це поточна поведінка).
-//	                           Це навмисно: зелений старт означає, що
-//	                           середовище живе, і далі ви ламаєте тести
-//	                           свідомо, а не воюєте з інструментами.
-//
-// Ваш шлях: реалізуєте TODO у pipeline.go → тести нижче ПАДАЮТЬ, бо вони
-// описують стару поведінку → переписуєте їх під нову. Місця, які треба
-// переписати, позначені TODO(студент). Тест «таблиця не ріжеться»
-// (TestChunk_TableStaysWhole) уже описує ЦІЛЬОВУ поведінку і має падати, доки
-// chunk — заглушка: це контракт ДЗ, а не заготовка. Він єдиний тут із t.Skip —
-// зніміть skip, коли візьметесь за chunking.
-//
-// Тестам не потрібні ні Python, ні docling: PDF-шлях перевіряється фейковим
-// конвертером (fakeConverter). Справжній docling-mcp перевіряє opt-in тест
-// internal/docling (DOCLING_E2E=1), а його реальний вихід для тестового PDF
-// збережено в testdata/ledgerworks_soc2.docling.md.
-//
-// Чому StrictContextMock, а не nil: вузли приймають agent.Context. Передати
-// туди nil можна лише доти, доки ви його не використовуєте; щойно у вашому
-// коді з'явиться ctx.InvocationID() або емісія події, nil дасть panic у
-// найгіршому місці — у проді. StrictContextMock панікує ГУЧНО і одразу на
-// будь-якому методі, про який ви не подумали, тож помилка знаходиться в тесті,
-// а не на демо.
 package main
 
 import (
@@ -47,9 +14,6 @@ import (
 	"github.com/dimetron/ai-eng-course/labs/internal/labrun"
 )
 
-// nodeCtx — суворий фейк agent.Context. Вбудований StrictContextMock означає:
-// будь-який метод, який ваш вузол викличе, а ми його тут не передбачили,
-// впаде з panic, а не поверне тихо нульове значення.
 type nodeCtx struct {
 	agent.StrictContextMock
 }
@@ -58,7 +22,6 @@ func newNodeCtx() *nodeCtx {
 	return &nodeCtx{StrictContextMock: agent.NewStrictContextMock(context.Background())}
 }
 
-// fakeConverter підміняє docling-mcp: повертає заданий Markdown або помилку.
 type fakeConverter struct {
 	markdown string
 	err      error
@@ -74,8 +37,6 @@ const (
 	fixtureDocMD  = "testdata/ledgerworks_soc2.docling.md"
 	fixtureTables = 3
 )
-
-// --- Вузол load --------------------------------------------------------------
 
 func TestLoad(t *testing.T) {
 	t.Parallel()
@@ -118,8 +79,6 @@ func TestLoad(t *testing.T) {
 	}
 }
 
-// --- Вузол parse -------------------------------------------------------------
-
 func TestParse(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -159,10 +118,6 @@ func TestParse(t *testing.T) {
 	}
 }
 
-// TestDoclingFixtureKeepsTables фіксує, що дає docling на тестовому PDF: усі
-// три таблиці — цілими, із заголовками. Зверніть увагу на пастку: docling
-// сплющує рівні заголовків — і "1 Scope", і "1.1 Vendors in scope" стають
-// "##". Ієрархію для Parent-Child доведеться відновлювати з нумерації розділів.
 func TestDoclingFixtureKeepsTables(t *testing.T) {
 	t.Parallel()
 	data, err := os.ReadFile(fixtureDocMD)
@@ -178,28 +133,19 @@ func TestDoclingFixtureKeepsTables(t *testing.T) {
 	}
 }
 
-// --- Вузол chunk -------------------------------------------------------------
-
-// TestChunk_Stub фіксує ПОТОЧНУ поведінку заглушки: один чанк на весь документ.
-//
-// TODO(студент): щойно ви реалізуєте Parent-Child chunking, цей тест має
-// впасти — і це правильно. Замініть його на перевірку вашої ієрархії:
-// скільки parents, скільки children, чи в кожного child заповнений ParentID
-// і SectionPath, чи Level зростає всередині розділу.
-func TestChunk_Stub(t *testing.T) {
+func TestChunk_Hierarchy(t *testing.T) {
 	t.Parallel()
 	got, err := chunk(newNodeCtx(), newDocument("d1", "", "# Розділ\n\nабзац\n"))
 	if err != nil {
 		t.Fatalf("chunk() error = %v", err)
 	}
-	if len(got.Chunks) != 1 {
-		t.Fatalf("заглушка має повертати 1 чанк, отримали %d — схоже, ви вже реалізували chunking; перепишіть цей тест", len(got.Chunks))
+	if len(got.Chunks) < 2 {
+		t.Fatalf("очікували ієрархічні чанки (parent та child), отримали %d", len(got.Chunks))
 	}
-	if got.Chunks[0].ParentID != "" {
-		t.Errorf("ParentID кореневого чанка = %q, очікували порожній", got.Chunks[0].ParentID)
-	}
-	if got.Chunks[0].DocumentID != "d1" {
-		t.Errorf("DocumentID = %q, очікували d1 — provenance втрачено", got.Chunks[0].DocumentID)
+	for _, c := range got.Chunks {
+		if c.DocumentID != "d1" {
+			t.Errorf("DocumentID = %q, очікували d1", c.DocumentID)
+		}
 	}
 }
 
@@ -210,16 +156,7 @@ func TestChunk_EmptyDocumentIsError(t *testing.T) {
 	}
 }
 
-// TestChunk_TableStaysWhole — КОНТРАКТ ДЗ, а не заготовка.
-//
-// Головна вимога тижня: жодна таблиця не може бути розрізана між двома
-// чанками. Тест перевіряє це напряму на реальному виході docling: кожна
-// таблиця — рівно один чанк Kind == "table", з усіма рядками й заголовком.
-//
-// TODO(студент): приберіть t.Skip, коли візьметесь за вузол chunk.
 func TestChunk_TableStaysWhole(t *testing.T) {
-	t.Skip("зніміть skip, коли реалізуєте Parent-Child chunking у pipeline.go")
-
 	data, err := os.ReadFile(fixtureDocMD)
 	if err != nil {
 		t.Fatal(err)
@@ -266,10 +203,8 @@ func TestChunk_TableStaysWhole(t *testing.T) {
 	}
 }
 
-// firstTableRow — перший рядок таблиці (рядок заголовків), щоб "Vendor" у
-// таблиці знахідок не сплутати з таблицею вендорів.
 func firstTableRow(text string) string {
-	for line := range strings.Lines(text) {
+	for _, line := range strings.Split(text, "\n") {
 		if line = strings.TrimSpace(line); strings.HasPrefix(line, "|") {
 			return line
 		}
@@ -277,14 +212,6 @@ func firstTableRow(text string) string {
 	return ""
 }
 
-// --- Вузли extract_entities / index_vector / index_graph ---------------------
-
-// TestStubNodesPassThrough фіксує заглушки: вузли повертають batch без змін.
-//
-// TODO(студент): замініть на табличні тести ваших вузлів — наприклад,
-// extract_entities знаходить Vendor "Acme Bank JSC" із SourceChunkID;
-// index_vector дає VectorsAdded == кількість children і st.Vector.Len() те
-// саме; index_graph не створює дублікатів (NodesAdded ≤ len(Entities)).
 func TestStubNodesPassThrough(t *testing.T) {
 	t.Parallel()
 	in := Batch{Chunks: []Chunk{{ID: "c1", Text: "Acme Bank JSC"}}}
@@ -308,11 +235,6 @@ func TestStubNodesPassThrough(t *testing.T) {
 	}
 }
 
-// --- Вузол report ------------------------------------------------------------
-
-// TODO(студент): за Homework п.5 report має друкувати статистику за рівнями,
-// розміри (min/avg/max) і `Tables: K/K preserved`. Розширте таблицю кейсів,
-// коли реалізуєте це.
 func TestReport(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -338,10 +260,6 @@ func TestReport(t *testing.T) {
 	}
 }
 
-// --- Граф цілком ------------------------------------------------------------
-
-// TestGraph_EarlyWin проганяє весь граф так само, як `go run . console`, але
-// без launcher-а: ранній win із Homework, відтворюваний у CI.
 func TestGraph_EarlyWin(t *testing.T) {
 	t.Parallel()
 	a, err := newGraph(fakeConverter{}, NewStores())
@@ -352,19 +270,14 @@ func TestGraph_EarlyWin(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if !strings.Contains(res.Final, "Отримано 1 чанків") {
-		t.Errorf("фінальна відповідь = %q; очікували рядок вузла report", res.Final)
+	if !strings.Contains(res.Final, "Ingestion Pipeline Report") {
+		t.Errorf("фінальна відповідь = %q; очікували звіт пайплайна", res.Final)
 	}
-	// 7 вузлів після Start — 7 подій: жоден вузол не випав із ланцюжка.
 	if got := len(res.Events); got != 7 {
 		t.Errorf("подій = %d, очікували 7 (load … report)", got)
 	}
 }
 
-// --- Контракт із ДЗ 6 --------------------------------------------------------
-
-// TestChunkJSONContract: labs6 читає ваші чанки як JSON. Імена полів — це
-// контракт між ДЗ 5 і ДЗ 6; якщо тест упав, ви перейменували поле.
 func TestChunkJSONContract(t *testing.T) {
 	t.Parallel()
 	raw, err := json.Marshal(Chunk{ID: "c", DocumentID: "d", ParentID: "p", Level: 2, Kind: "table", SectionPath: "s", Text: "t"})

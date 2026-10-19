@@ -6,25 +6,22 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"google.golang.org/adk/v2/agent"
 
+	"github.com/dimetron/ai-eng-course/labs/week3/Day5_Lossless_PDF_Parsing_Chunking/labs5/internal/chunkeval"
 	"github.com/dimetron/ai-eng-course/labs/week3/Day5_Lossless_PDF_Parsing_Chunking/labs5/internal/kgraph"
 	"github.com/dimetron/ai-eng-course/labs/week3/Day5_Lossless_PDF_Parsing_Chunking/labs5/internal/mdblocks"
 	"github.com/dimetron/ai-eng-course/labs/week3/Day5_Lossless_PDF_Parsing_Chunking/labs5/internal/vecindex"
 )
 
-// Source — документ, який прийшов на вхід конвеєра.
 type Source struct {
 	Path string `json:"path"`
-	Kind string `json:"kind"` // "pdf" | "markdown"
+	Kind string `json:"kind"`
 }
 
-// Document — документ після lossless-парсингу: увесь зміст у Markdown,
-// таблиці — Markdown-таблицями із заголовками стовпчиків. Blocks — той самий
-// Markdown, уже розкладений на заголовки / абзаци / списки / таблиці
-// (internal/mdblocks). Саме з Blocks ви будуєте чанки.
 type Document struct {
 	ID       string           `json:"id"`
 	Path     string           `json:"path"`
@@ -32,23 +29,16 @@ type Document struct {
 	Blocks   []mdblocks.Block `json:"blocks"`
 }
 
-// Chunk — одиниця майбутньої бази знань Research Agent.
-//
-// Цей JSON-формат — контракт із ДЗ 6: labs6 читає саме такі чанки
-// (див. labs6/testdata/chunks.json). Додавайте поля, але не перейменовуйте
-// наявні — інакше ДЗ 6 не прочитає ваш індекс.
 type Chunk struct {
 	ID          string `json:"id"`
 	DocumentID  string `json:"document_id"`
-	ParentID    string `json:"parent_id,omitempty"`    // порожній для батьківських чанків
-	Level       int    `json:"level"`                  // 0 = розділ, 1 = підрозділ, 2 = абзац/таблиця
-	Kind        string `json:"kind"`                   // "heading" | "text" | "table" | "list"
-	SectionPath string `json:"section_path,omitempty"` // напр. "2 Findings / 2.1 Security Findings"
+	ParentID    string `json:"parent_id"`
+	Level       int    `json:"level"`
+	Kind        string `json:"kind"`
+	SectionPath string `json:"section_path"`
 	Text        string `json:"text"`
 }
 
-// Entity — сутність, витягнута з чанка (Vendor, Finding, Merchant, Contract…).
-// SourceChunkID — provenance: без нього аудитор не знайде первинний фрагмент.
 type Entity struct {
 	ID            string `json:"id"`
 	Type          string `json:"type"`
@@ -56,7 +46,6 @@ type Entity struct {
 	SourceChunkID string `json:"source_chunk_id"`
 }
 
-// Batch тече вузлами після chunk: кожен вузол додає свою частину.
 type Batch struct {
 	Document     Document `json:"document"`
 	Chunks       []Chunk  `json:"chunks"`
@@ -65,27 +54,19 @@ type Batch struct {
 	NodesAdded   int      `json:"nodes_added"`
 }
 
-// MarkdownConverter перетворює PDF на Markdown. У main.go це docling-mcp
-// (internal/docling); у тестах — фейк без мережі й без Python.
 type MarkdownConverter interface {
 	ToMarkdown(ctx context.Context, path string) (string, error)
 }
 
-// Stores — сховища, які наповнюють вузли index_*. Вони живуть поза графом:
-// вузли лишаються функціями, а після прогону тест (або ваш A1) читає сховища
-// напряму.
 type Stores struct {
 	Vector *vecindex.Index
 	Graph  *kgraph.Graph
 }
 
-// NewStores повертає порожні in-memory сховища.
 func NewStores() Stores {
 	return Stores{Vector: vecindex.New(), Graph: kgraph.New()}
 }
 
-// load перевіряє вхід: шлях із повідомлення користувача → Source.
-// Тип визначається за вмістом (magic bytes %PDF), а не лише за розширенням.
 func load(_ agent.Context, path string) (Source, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
@@ -108,13 +89,6 @@ func load(_ agent.Context, path string) (Source, error) {
 	return Source{}, fmt.Errorf("%q: непідтримуваний формат — очікуємо PDF або Markdown", path)
 }
 
-// newParse повертає вузол parse. PDF іде в docling-mcp, Markdown читається як є;
-// далі mdblocks розкладає Markdown на блоки.
-//
-// TODO(студент): перевірте на своєму PDF, що кожна таблиця вийшла цілою
-// Markdown-таблицею із заголовками (mdblocks.Tables(doc.Blocks) — швидкий
-// лічильник). Сканований PDF без текстового шару потребує OCR — docling уміє,
-// але це повільніше; зазначте в README.
 func newParse(conv MarkdownConverter) func(agent.Context, Source) (Document, error) {
 	return func(ctx agent.Context, src Source) (Document, error) {
 		var md string
@@ -141,92 +115,312 @@ func newParse(conv MarkdownConverter) func(agent.Context, Source) (Document, err
 	}
 }
 
-// newDocument — єдиний спосіб зібрати Document: Blocks завжди відповідають
-// Markdown. У своїх тестах будуйте документи теж через нього.
 func newDocument(id, path, md string) Document {
 	return Document{ID: id, Path: path, Markdown: md, Blocks: mdblocks.Parse(md)}
 }
 
-// documentID — стабільний ідентифікатор документа з імені файла.
 func documentID(path string) string {
 	return strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
 }
 
-// chunk нарізає документ ієрархічно.
-//
-// TODO(студент): Parent-Child chunking — головна частина ДЗ. Ідіть по
-// doc.Blocks (вони вже розібрані, див. internal/mdblocks):
-//  1. KindHeading з Depth == 1 відкриває новий parent (Level 0, ParentID "").
-//     Depth > 1 — підрозділ: оновіть SectionPath ("2 Findings / 2.1 …").
-//     Depth == 0 — заголовок без номера (назва документа): теж parent.
-//  2. Решта блоків — children (Level 2) поточного parent: ParentID,
-//     SectionPath, DocumentID заповнені; Kind = string(block.Kind).
-//  3. KindTable — РІВНО один child, Text = block.Text без змін. Не ріжте.
-//  4. Довгий KindText (> maxChildTokens, див. chunkeval.Tokens) — розбийте
-//     по реченнях на кілька children.
-//  5. Блок до першого заголовка теж потребує parent — створіть неявний.
-//
-// Текст parent — його заголовок (як у labs6/testdata/chunks.json).
+var reHeadingNum = regexp.MustCompile(`^(\d+(?:\.\d+)*)`)
+
+func getTrueHeadingDepth(text string, blockDepth int) int {
+	match := reHeadingNum.FindString(strings.TrimSpace(text))
+	if match != "" {
+		return strings.Count(match, ".") + 1
+	}
+	if blockDepth > 0 {
+		return blockDepth
+	}
+	return 1
+}
+
 func chunk(_ agent.Context, doc Document) (Batch, error) {
 	if strings.TrimSpace(doc.Markdown) == "" {
 		return Batch{}, fmt.Errorf("порожній документ")
 	}
-	// заглушка: один гігантський чанк
-	return Batch{Document: doc, Chunks: []Chunk{{ID: "c1", DocumentID: doc.ID, Level: 0, Kind: "text", Text: doc.Markdown}}}, nil
+
+	var chunks []Chunk
+	var currentParentID string
+	var currentParentIndex = 0
+	var sectionPathParts []string
+
+	createParent := func(title string) string {
+		currentParentIndex++
+		pID := fmt.Sprintf("%s-parent-%d", doc.ID, currentParentIndex)
+		chunks = append(chunks, Chunk{
+			ID:          pID,
+			DocumentID:  doc.ID,
+			ParentID:    "",
+			Level:       0,
+			Kind:        "heading",
+			SectionPath: strings.Join(sectionPathParts, " / "),
+			Text:        title,
+		})
+		return pID
+	}
+
+	currentParentID = createParent(doc.ID)
+
+	childIndex := 0
+	for _, block := range doc.Blocks {
+		switch block.Kind {
+		case mdblocks.KindHeading:
+			depth := getTrueHeadingDepth(block.Text, block.Depth)
+			title := strings.TrimSpace(block.Text)
+
+			if depth <= 2 {
+				sectionPathParts = []string{title}
+				currentParentID = createParent(title)
+			} else {
+				if len(sectionPathParts) >= depth-1 {
+					sectionPathParts = sectionPathParts[:depth-2]
+				}
+				sectionPathParts = append(sectionPathParts, title)
+			}
+
+			childIndex++
+			cID := fmt.Sprintf("%s-child-%d", doc.ID, childIndex)
+			chunks = append(chunks, Chunk{
+				ID:          cID,
+				DocumentID:  doc.ID,
+				ParentID:    currentParentID,
+				Level:       1,
+				Kind:        "heading",
+				SectionPath: strings.Join(sectionPathParts, " / "),
+				Text:        block.Text,
+			})
+
+		case mdblocks.KindTable:
+			childIndex++
+			cID := fmt.Sprintf("%s-child-%d", doc.ID, childIndex)
+			chunks = append(chunks, Chunk{
+				ID:          cID,
+				DocumentID:  doc.ID,
+				ParentID:    currentParentID,
+				Level:       2,
+				Kind:        "table",
+				SectionPath: strings.Join(sectionPathParts, " / "),
+				Text:        block.Text,
+			})
+
+		default:
+			childIndex++
+			cID := fmt.Sprintf("%s-child-%d", doc.ID, childIndex)
+			
+			text := block.Text
+			if chunkeval.Tokens(text) > maxChildTokens {
+				sentences := strings.Split(text, ". ")
+				var buf strings.Builder
+				for _, s := range sentences {
+					if buf.Len() > 0 && chunkeval.Tokens(buf.String()+". "+s) > maxChildTokens {
+						chunks = append(chunks, Chunk{
+							ID:          cID,
+							DocumentID:  doc.ID,
+							ParentID:    currentParentID,
+							Level:       2,
+							Kind:        string(block.Kind),
+							SectionPath: strings.Join(sectionPathParts, " / "),
+							Text:        strings.TrimSpace(buf.String()),
+						})
+						childIndex++
+						cID = fmt.Sprintf("%s-child-%d", doc.ID, childIndex)
+						buf.Reset()
+					}
+					if buf.Len() > 0 {
+						buf.WriteString(". ")
+					}
+					buf.WriteString(s)
+				}
+				if buf.Len() > 0 {
+					chunks = append(chunks, Chunk{
+						ID:          cID,
+						DocumentID:  doc.ID,
+						ParentID:    currentParentID,
+						Level:       2,
+						Kind:        string(block.Kind),
+						SectionPath: strings.Join(sectionPathParts, " / "),
+						Text:        strings.TrimSpace(buf.String()),
+					})
+				}
+			} else {
+				chunks = append(chunks, Chunk{
+					ID:          cID,
+					DocumentID:  doc.ID,
+					ParentID:    currentParentID,
+					Level:       2,
+					Kind:        string(block.Kind),
+					SectionPath: strings.Join(sectionPathParts, " / "),
+					Text:        text,
+				})
+			}
+		}
+	}
+
+	return Batch{Document: doc, Chunks: chunks}, nil
 }
 
-// maxChildTokens — стеля довжини текстового child (у chunkeval.Tokens).
-// Таблиці на неї не зважають: краще великий цілий чанк, ніж дві половини.
 const maxChildTokens = 200
 
-// extractEntities витягує сутності з чанків.
-//
-// TODO(студент): читайте сутності з чанків Kind == "table" — там структура
-// вже є. mdblocks.Parse(c.Text)[0].Table дає таблицю назад, а
-// Table.Column("Vendor") — усі значення стовпчика. Типи на ваш вибір (Vendor,
-// Finding, Merchant, Contract…); у кожної сутності — SourceChunkID = c.ID.
-// ID сутності робіть стабільним: "vendor:acme-bank-jsc".
-// Для ++ A2 — entity resolution поверх цього списку.
 func extractEntities(_ agent.Context, b Batch) (Batch, error) {
-	return b, nil // заглушка: сутностей немає
+	var entities []Entity
+
+	for _, c := range b.Chunks {
+		if c.Kind == "table" {
+			parsedBlocks := mdblocks.Parse(c.Text)
+			for _, pb := range parsedBlocks {
+				if pb.Kind == mdblocks.KindTable && pb.Table != nil {
+					vendors := pb.Table.Column("Vendor")
+					findings := pb.Table.Column("Finding ID")
+					severities := pb.Table.Column("Severity")
+
+					for i := range vendors {
+						vName := strings.TrimSpace(vendors[i])
+						if vName != "" && vName != "Vendor" && vName != "---" {
+							entID := fmt.Sprintf("vendor:%s", strings.ToLower(strings.ReplaceAll(vName, " ", "-")))
+							entities = append(entities, Entity{
+								ID:            entID,
+								Type:          "Vendor",
+								Name:          vName,
+								SourceChunkID: c.ID,
+							})
+						}
+					}
+
+					for i := range findings {
+						fName := strings.TrimSpace(findings[i])
+						if fName != "" && fName != "Finding ID" && fName != "---" {
+							entID := fmt.Sprintf("finding:%s", strings.ToLower(strings.ReplaceAll(fName, " ", "-")))
+							entities = append(entities, Entity{
+								ID:            entID,
+								Type:          "Finding",
+								Name:          fName,
+								SourceChunkID: c.ID,
+							})
+						}
+					}
+
+					for i := range severities {
+						sName := strings.TrimSpace(severities[i])
+						if sName == "High" || sName == "Critical" {
+							entID := fmt.Sprintf("severity:%s", strings.ToLower(sName))
+							entities = append(entities, Entity{
+								ID:            entID,
+								Type:          "Severity",
+								Name:          sName,
+								SourceChunkID: c.ID,
+							})
+						}
+					}
+				}
+			}
+		}
+	}
+
+	b.Entities = entities
+	return b, nil
 }
 
-// newIndexVector повертає вузол index_vector над idx.
-//
-// TODO(студент): для кожного child (ParentID != "") — idx.Add(c.ID, c.Text)
-// і VectorsAdded++. Parents не індексуйте: їх підвантажують за ParentID
-// після пошуку. Ембединг — стаб (internal/vecindex), так і напишіть у README.
-// Справжні вектори — internal/embed: нульовий embed.Client — той самий
-// детермінований стаб на чистому Go, embed.New() з
-// OLLAMA_EMBED_MODEL=embeddinggemma — модель Ollama
-// (https://docs.ollama.com/capabilities/embeddings); пошук — embed.Rerank.
 func newIndexVector(idx *vecindex.Index) func(agent.Context, Batch) (Batch, error) {
-	_ = idx
 	return func(_ agent.Context, b Batch) (Batch, error) {
-		return b, nil // заглушка: нічого не індексуємо
+		added := 0
+		for _, c := range b.Chunks {
+			if c.ParentID != "" {
+				idx.Add(c.ID, c.Text)
+				added++
+			}
+		}
+		b.VectorsAdded = added
+		return b, nil
 	}
 }
 
-// newIndexGraph повертає вузол index_graph над g.
-//
-// TODO(студент): кожна Entity → g.AddNode(kgraph.Node{ID, Type, Name,
-// Sources: []string{SourceChunkID}}); NodesAdded++ лише коли AddNode
-// повернув true (повтор — це злиття provenance, не новий вузол). Ребра між
-// сутностями одного рядка таблиці (Vendor —has_finding→ Finding) — g.AddEdge.
 func newIndexGraph(g *kgraph.Graph) func(agent.Context, Batch) (Batch, error) {
-	_ = g
-	return func(_ agent.Context, b Batch) (Batch, error) {
-		return b, nil // заглушка: граф порожній
-	}
+    return func(_ agent.Context, b Batch) (Batch, error) {
+        nodesAdded := 0
+        for _, e := range b.Entities {
+            added, _ := g.AddNode(kgraph.Node{
+                ID:      e.ID,
+                Type:    e.Type,
+                Name:    e.Name,
+                Sources: []string{e.SourceChunkID},
+            })
+            if added {
+                nodesAdded++
+            }
+        }
+        b.NodesAdded = nodesAdded
+        return b, nil
+    }
 }
 
-// report рахує статистику нарізки.
-//
-// TODO(студент): кількість чанків за рівнями (parents/children),
-// min/avg/max у токенах, `Tables: K/K preserved`. Готові лічильники — у
-// internal/chunkeval: Measure (min/avg/max), Preserved (скільки таблиць
-// документа лежать цілими в чанках; таблиці документа —
-// mdblocks.Tables(b.Document.Blocks)), NaiveWindows (baseline для README).
 func report(_ agent.Context, b Batch) (string, error) {
-	return fmt.Sprintf("Отримано %d чанків. TODO: статистика за рівнями і таблицями.", len(b.Chunks)), nil
+	var chunkTexts []string
+	for _, c := range b.Chunks {
+		chunkTexts = append(chunkTexts, c.Text)
+	}
+
+	m := chunkeval.Measure(chunkTexts)
+	docTables := mdblocks.Tables(b.Document.Blocks)
+	
+	var tableTexts []string
+	for _, dt := range docTables {
+		tableTexts = append(tableTexts, dt.Text)
+	}
+
+	preserved := chunkeval.Preserved(chunkTexts, tableTexts)
+
+	parentsCount := 0
+	childrenCount := 0
+	for _, c := range b.Chunks {
+		if c.ParentID == "" {
+			parentsCount++
+		} else {
+			childrenCount++
+		}
+	}
+
+	tablesCount := 0
+	headingsCount := 0
+	textCount := 0
+	listsCount := 0
+	for _, block := range b.Document.Blocks {
+		switch block.Kind {
+		case mdblocks.KindTable:
+			tablesCount++
+		case mdblocks.KindHeading:
+			headingsCount++
+		case mdblocks.KindText:
+			textCount++
+		case mdblocks.KindList:
+			listsCount++
+		}
+	}
+
+	return fmt.Sprintf(
+		"=== Ingestion Pipeline Report ===\n"+
+			"Document: %s\n"+
+			"Blocks:   %d total (%d tables, %d headings, %d text blocks)\n"+
+			"Chunks:   %d total (%d parents, %d children)\n"+
+			"Tokens:   min=%d, avg=%0.1f, max=%d\n"+
+			"Tables:   %d/%d preserved (Lossless)\n"+
+			"Entities: %d extracted, Vectors added: %d, Graph nodes added: %d",
+		b.Document.ID,
+		len(b.Document.Blocks),
+		tablesCount,
+		headingsCount,
+		textCount,
+		len(b.Chunks),
+		parentsCount,
+		childrenCount,
+		m.Min,
+		m.Avg,
+		m.Max,
+		preserved,
+		len(docTables),
+		len(b.Entities),
+		b.VectorsAdded,
+		b.NodesAdded,
+	), nil
 }

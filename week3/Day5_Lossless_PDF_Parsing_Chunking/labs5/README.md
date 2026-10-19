@@ -77,3 +77,30 @@ DOCLING_E2E=1 go test -run TestRealServer -v ./week3/Day5_Lossless_PDF_Parsing_C
 
 ДЗ 6 читає масив `Chunk` у JSON (поля фіксує `TestChunkJSONContract`). Збережіть свої чанки й
 запустіть ДЗ 6 так: `CHUNKS=…/chunks.json go run . console`.
+
+=== Ingestion Pipeline Report ===
+Document: ledgerworks_soc2
+Chunks:   33 total (12 parents, 21 children)
+Tokens:   min=1, avg=12.5, max=78
+Tables:   3/3 preserved (Lossless)
+Entities: 16 extracted, Vectors added: 21, Graph nodes added: 9
+
+### Критерій,(А) Naive Chunking (Фіксоване вікно 800 токенів),(Б) Структурний Parser + Parent-Child (Наш пайплайн)
+
+Цілісність таблиць,"Розрізано. Символьний ліміт розриває Markdown-таблицю навпіл (наприклад, у першому чанку залишається шапка Vendor | Risk, а в наступному — рядки даних без заголовків).",Ціла (100% збережено). Кожна таблиця визначена як неподільний блок (BlockTable) і загортається в окремий child-чанк з успадкованим контекстом розділу.
+Зв'язок із контекстом (Provenance),"Втрачено. Чанки з даними не знають, до якого розділу чи підрозділу документа вони належали.","Збережено. Завдяки ієрархії кожен child-чанк має ParentID та SectionPath (наприклад, 1. Access Control / 1.1 Identity)."
+Якість пошуку (Retrieval),"Модель галюцинує або видає відповідь «не знайдено», оскільки ключові стовпчики відірвані від значень.","Векторний та графовий пошук знаходять релевантні сутності безпосередньо зі збереженими атрибутами (Vendor, Finding ID, Severity)."
+
+### Приклад розрізненої таблиці при Naive Approach (Чому це важливо)
+Що бачить RAG при Naive Chunking (Розрив чанку):
+Чанк #1: \| Vendor \| Compliance Status \| (Заголовок є, дані відсутні)
+
+Чанк #2: \| Active Directory \| Compliant \| (Дані є, контекст і заголовок втрачені)
+
+### Що бачить RAG у нашому пайплайні:
+Child Chunk (Kind == table):
+| Vendor / Service | MFA Enforced? | Compliance Status |
+| --- | --- | --- |
+| Active Directory | Yes (FIDO2 / TOTP) | Compliant |
+
+Прив'язка: ParentID: ledgerworks_soc2-parent-2, SectionPath: 1. Access Control / 1.1 Identity.
