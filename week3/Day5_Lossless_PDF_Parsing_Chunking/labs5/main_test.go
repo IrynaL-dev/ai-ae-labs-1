@@ -212,29 +212,6 @@ func firstTableRow(text string) string {
 	return ""
 }
 
-func TestStubNodesPassThrough(t *testing.T) {
-	t.Parallel()
-	in := Batch{Chunks: []Chunk{{ID: "c1", Text: "Acme Bank JSC"}}}
-	st := NewStores()
-	nodes := map[string]func(agent.Context, Batch) (Batch, error){
-		"extract_entities": extractEntities,
-		"index_vector":     newIndexVector(st.Vector),
-		"index_graph":      newIndexGraph(st.Graph),
-	}
-	for name, node := range nodes {
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			got, err := node(newNodeCtx(), in)
-			if err != nil {
-				t.Fatalf("%s: %v", name, err)
-			}
-			if len(got.Chunks) != len(in.Chunks) {
-				t.Errorf("%s загубив чанки: %d → %d", name, len(in.Chunks), len(got.Chunks))
-			}
-		})
-	}
-}
-
 func TestReport(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -288,5 +265,71 @@ func TestChunkJSONContract(t *testing.T) {
 		if !strings.Contains(string(raw), key) {
 			t.Errorf("JSON чанка без поля %s: %s", key, raw)
 		}
+	}
+}
+
+func TestExtractEntities(t *testing.T) {
+	t.Parallel()
+	tableMD := "| Vendor | Finding ID | Severity |\n|---|---|---|\n| Acme Bank | F-101 | High |\n| Northwind | F-102 | Low |"
+	in := Batch{
+		Chunks: []Chunk{
+			{ID: "c-text", Kind: "text", Text: "Звичайний абзац без таблиці"},
+			{ID: "c-table", Kind: "table", Text: tableMD},
+		},
+	}
+
+	got, err := extractEntities(newNodeCtx(), in)
+	if err != nil {
+		t.Fatalf("extractEntities() error = %v", err)
+	}
+
+	if len(got.Entities) != 5 {
+		t.Fatalf("очікували 5 сутностей, отримали %d: %+v", len(got.Entities), got.Entities)
+	}
+
+	for _, e := range got.Entities {
+		if e.SourceChunkID != "c-table" {
+			t.Errorf("сутність %q має SourceChunkID = %q, очікували c-table", e.ID, e.SourceChunkID)
+		}
+	}
+}
+
+func TestIndexVector(t *testing.T) {
+	t.Parallel()
+	st := NewStores()
+	in := Batch{
+		Chunks: []Chunk{
+			{ID: "p1", ParentID: "", Text: "Батьківський заголовок"},
+			{ID: "c1", ParentID: "p1", Text: "Перший дочірній чанк"},
+			{ID: "c2", ParentID: "p1", Text: "Другий дочірній чанк"},
+		},
+	}
+
+	got, err := newIndexVector(st.Vector)(newNodeCtx(), in)
+	if err != nil {
+		t.Fatalf("index_vector error = %v", err)
+	}
+	if got.VectorsAdded != 2 {
+		t.Errorf("VectorsAdded = %d, очікували 2 (тільки дочірні чанки)", got.VectorsAdded)
+	}
+}
+
+func TestIndexGraph(t *testing.T) {
+	t.Parallel()
+	st := NewStores()
+	in := Batch{
+		Entities: []Entity{
+			{ID: "vendor:acme-bank", Type: "Vendor", Name: "Acme Bank", SourceChunkID: "c1"},
+			{ID: "finding:f-101", Type: "Finding", Name: "F-101", SourceChunkID: "c1"},
+			{ID: "vendor:acme-bank", Type: "Vendor", Name: "Acme Bank", SourceChunkID: "c2"},
+		},
+	}
+
+	got, err := newIndexGraph(st.Graph)(newNodeCtx(), in)
+	if err != nil {
+		t.Fatalf("index_graph error = %v", err)
+	}
+	if got.NodesAdded != 2 {
+		t.Errorf("NodesAdded = %d, очікували 2 унікальні вузли", got.NodesAdded)
 	}
 }
