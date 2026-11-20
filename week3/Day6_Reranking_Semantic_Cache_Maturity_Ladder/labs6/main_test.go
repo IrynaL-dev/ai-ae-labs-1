@@ -213,7 +213,6 @@ func TestCache_ConcurrentAccess(t *testing.T) {
 // hit-rate без виміряного false-positive rate — це не перемога, а регресія
 // якості («кеш — це межа безпеки»).
 func TestCache_ParaphraseHits(t *testing.T) {
-	t.Skip("зніміть skip, коли реалізуєте семантичний кеш замість точного map-lookup")
 
 	r := newTestRetriever(t)
 	ctx := newNodeCtx()
@@ -285,7 +284,6 @@ func TestBaseline_ConfusesTariffs(t *testing.T) {
 // із цього тесту можна одразу класти в README — це один із п'яти потрібних
 // прикладів.
 func TestRerank_ChangesOrder(t *testing.T) {
-	t.Skip("зніміть skip, коли реалізуєте re-ranker у retrieval.go")
 
 	in := SearchResult{Query: "яка ставка комісії на тарифі T-2?", Candidates: []Candidate{
 		{ChunkID: "c-A331-rate", DocumentID: "ledgerworks_soc2", Text: "Мерчант A-331 обслуговується за тарифом T-1, ставка комісії 1.8 %.", Score: 0.88},
@@ -314,5 +312,27 @@ func TestChunksPath(t *testing.T) {
 	}
 	if got := chunksPath("my.json"); got != "my.json" {
 		t.Errorf("chunksPath(my.json) = %q", got)
+	}
+}
+
+func TestCache_NoFalsePositive(t *testing.T) {
+	t.Parallel()
+	r := newTestRetriever(t)
+	ctx := newNodeCtx()
+
+	first, err := r.search(ctx, "Що таке тариф T-2?")
+	if err != nil {
+		t.Fatalf("search #1: %v", err)
+	}
+	if _, err := r.answer(ctx, first); err != nil {
+		t.Fatalf("answer: %v", err)
+	}
+
+	other, err := r.search(ctx, "Що таке тариф T-1?")
+	if err != nil {
+		t.Fatalf("search T-1: %v", err)
+	}
+	if other.CacheHit {
+		t.Errorf("false positive: запит про T-1 не має отримувати кешовану відповідь про T-2")
 	}
 }
